@@ -31,7 +31,7 @@ function bulletSummary(text, n) {
   return parts.slice(0, n).map(s => s.trim());
 }
 
-function computeChurnRisk(uf, zf, inf, ef, dauPct) {
+function computeChurnRisk(uf, zf, inf, ef, dauPct, compositeScore) {
   let signals = [];
   if (dauPct < 35)                            signals.push({ label: "Low DAU", weight: 3 });
   if (uf.survey_trend === "declining")         signals.push({ label: "Declining satisfaction", weight: 3 });
@@ -44,9 +44,18 @@ function computeChurnRisk(uf, zf, inf, ef, dauPct) {
   if (ef.expansion_conversation_logged === false && ef.renewal_days_out < 90) signals.push({ label: "No expansion talk", weight: 1 });
   if (inf.milestones_at_risk > 1)             signals.push({ label: "Milestones slipping", weight: 2 });
   if (ef.renewal_days_out < 60)               signals.push({ label: "Renewal imminent", weight: 1 });
-  const score = signals.reduce((sum, s) => sum + s.weight, 0);
-  const level = score >= 8 ? "high" : score >= 4 ? "medium" : "low";
-  return { level, signals, score };
+
+  const signalScore = signals.reduce((sum, s) => sum + s.weight, 0);
+
+  // Composite score acts as a floor — a low health score cannot produce low churn risk
+  const scoreFloor = compositeScore < 65 ? "high" : compositeScore < 80 ? "medium" : null;
+  const signalLevel = signalScore >= 8 ? "high" : signalScore >= 4 ? "medium" : "low";
+
+  // Take the worse of the two
+  const levelOrder = { low: 0, medium: 1, high: 2 };
+  const level = scoreFloor && levelOrder[scoreFloor] > levelOrder[signalLevel] ? scoreFloor : signalLevel;
+
+  return { level, signals, score: signalScore };
 }
 
 // ─── TRANSFORM ────────────────────────────────────────────────────────────────
@@ -89,7 +98,7 @@ function transformRuns(rows) {
     const gongClass  = ef.gong_calls_30d >= 3 ? "g" : ef.gong_calls_30d >= 2 ? "a" : "r";
 
     const fullSummary = [u, im, z, ex].map(a => a.reasoning).join(" ");
-    const churnRisk   = computeChurnRisk(uf, zf, inf, ef, dauPct);
+    const churnRisk   = computeChurnRisk(uf, zf, inf, ef, dauPct, compositeScore);
     const actions = allAlerts.map(al => ({ text: al.title, urgency: al.type === "critical" ? "Urgent" : "This week" }));
     if (actions.length < 3 && ef.renewal_days_out <= 90) actions.push({ text: `Prep renewal conversation — ${ef.renewal_days_out} days out`, urgency: "This week" });
 
@@ -161,13 +170,15 @@ function ScoreRing({ score, rag }) {
 
 // ─── CHURN BADGE ──────────────────────────────────────────────────────────────
 const CHURN_REASONING = {
-  high:   "Multiple compounding risk signals detected — immediate intervention recommended.",
-  medium: "Some friction signals present. Monitor closely and address before renewal window.",
-  low:    "No significant churn indicators. Maintain engagement cadence.",
+  high:   "Multiple risk signals detected and overall health is critical — immediate intervention required.",
+  medium: "Health score and/or friction signals indicate elevated retention risk. Address before renewal window.",
+  low:    "No significant churn indicators. Health score and engagement are in good standing.",
 };
 function ChurnBadge({ risk }) {
   const [open, setOpen] = useState(false);
   const cfg = { high: { label: "High churn risk", cls: "churn-high" }, medium: { label: "Medium churn risk", cls: "churn-medium" }, low: { label: "Low churn risk", cls: "churn-low" } }[risk.level];
+  // Only show signals for medium/high — low means nothing meaningful fired
+  const showSignals = risk.level !== "low" && risk.signals.length > 0;
   return (
     <div className={`churn-badge ${cfg.cls} ${open ? "churn-open" : ""}`} onClick={() => setOpen(!open)}>
       <span className="churn-dot" />
@@ -176,7 +187,7 @@ function ChurnBadge({ risk }) {
       {open && (
         <div className="churn-panel" onClick={e => e.stopPropagation()}>
           <div className="churn-reasoning">{CHURN_REASONING[risk.level]}</div>
-          {risk.signals.length > 0 ? (
+          {showSignals && (
             <>
               <div className="churn-signals-title">Contributing signals</div>
               {risk.signals.map((s, i) => (
@@ -186,7 +197,7 @@ function ChurnBadge({ risk }) {
                 </div>
               ))}
             </>
-          ) : <div className="churn-no-signals">No risk signals detected across adoption, support, delivery, or engagement.</div>}
+          )}
         </div>
       )}
     </div>
